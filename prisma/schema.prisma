@@ -1,0 +1,310 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ПЕРЕЧИСЛЕНИЯ
+// ═══════════════════════════════════════════════════════════════════════════════
+
+enum Role {
+  CLIENT // Клиент
+  EMPLOYEE // Сотрудник
+}
+
+enum LoyaltyTransactionType {
+  CREDIT // Начисление баллов
+  DEBIT // Списание баллов
+}
+
+enum OrderStatus {
+  NEW // Новый
+  PAID // Оплачен
+  DELIVERED // Доставлен
+  CANCELLED // Отменён
+}
+
+enum PayerType {
+  INDIVIDUAL // Физическое лицо
+  LEGAL_ENTITY // Юридическое лицо
+}
+
+// Единица измерения товара
+enum Unit {
+  PCS // шт
+  BAG // меш
+  SQ_M // м²
+  CU_M // м³
+  PACK // уп
+  ROLL // рул
+  LIN_M // пог. м
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ПОЛЬЗОВАТЕЛИ — Identity & Loyalty
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model User {
+  id            Int     @id @default(autoincrement())
+  phone         String  @unique // Основной идентификатор = номер карты лояльности
+  email         String? @unique
+  password      String?
+  fullName      String?
+  bonusPoints   Int     @default(0)
+  acceptedTerms Boolean @default(false)
+  role          Role    @default(CLIENT)
+
+  // ─── OTP-поля для подтверждения телефона ────────────────────────────────────
+  otpCode     String?
+  otpExpires  DateTime?
+  otpAttempts Int       @default(0)
+  otpLastSent DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  loyaltyTransactions LoyaltyTransaction[]
+  orders              Order[]
+  reviews             Review[]
+  estimates           Estimate[]
+  cart                Cart?
+  favorites           Favorite[]
+  comparisonItems     ComparisonItem[]
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ПРОГРАММА ЛОЯЛЬНОСТИ
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model LoyaltyTransaction {
+  id        Int                    @id @default(autoincrement())
+  userId    Int
+  amount    Int // Абсолютная сумма баллов (направление определяет type)
+  type      LoyaltyTransactionType
+  createdAt DateTime               @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// КАТАЛОГ — 3 уровня через самоссылку
+//   L1 (level=1): Раздел      — image (баннер/картинка)
+//   L2 (level=2): Группа      — icon  (SVG/PNG иконка)
+//   L3 (level=3): Подгруппа   — листовые узлы, к которым привязаны товары
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model Category {
+  id       Int     @id @default(autoincrement())
+  name     String
+  slug     String  @unique
+  level    Int     @default(1) // 1 | 2 | 3
+  image    String? // Изображение для L1
+  icon     String? // Иконка SVG/PNG для L2
+  parentId Int?
+
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryTree")
+  products Product[]
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ТОВАРЫ
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model Product {
+  id          Int      @id @default(autoincrement())
+  sku         String?  @unique // Артикул
+  name        String
+  description String?  @db.Text // Длинное описание (без ограничений по длине)
+  price       Decimal  @db.Decimal(10, 2)
+  oldPrice    Decimal? @db.Decimal(10, 2) // Зачёркнутая цена
+  stock       Int      @default(0) // Остаток на складе
+  weight      Float? // Вес единицы товара, кг (для сметы)
+  images      String[] // Массив URL фотографий
+  unit        Unit     @default(PCS) // Единица измерения
+  rating      Float    @default(0) // Средний рейтинг 0.0–5.0
+  reviewCount Int      @default(0) // Денормализованный счётчик отзывов
+
+  categoryId Int // L3-категория (листовой узел)
+
+  // ─── Умные фильтры ──────────────────────────────────────────────────────────
+  // Хранит характеристики в зависимости от категории.
+  // Обои: { "material": "vinyl", "width_mm": 530 }
+  // Плитка: { "wear_resistance": "PEI-4", "finish": "glossy", "size": "60x60" }
+  characteristics Json?
+
+  // Подходящие комнаты: ["living_room", "kitchen", "bathroom", "bedroom", ...]
+  rooms String[]
+
+  // ─── Вариации (один товар = разные цвета/размеры) ───────────────────────────
+  // Все вариации ссылаются на «мастер»-товар через mainProductId.
+  mainProductId Int?
+  mainProduct   Product?  @relation("ProductVariations", fields: [mainProductId], references: [id])
+  variations    Product[] @relation("ProductVariations")
+
+  // ─── Аналоги (денормализованный список ID) ──────────────────────────────────
+  relatedProductIds Int[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  category        Category         @relation(fields: [categoryId], references: [id])
+  orderItems      OrderItem[]
+  reviews         Review[]
+  estimateItems   EstimateItem[]
+  cartItems       CartItem[]
+  favorites       Favorite[]
+  comparisonItems ComparisonItem[]
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// КОРЗИНА
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model Cart {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user  User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items CartItem[]
+}
+
+model CartItem {
+  id         Int     @id @default(autoincrement())
+  cartId     Int
+  productId  Int
+  quantity   Int     @default(1)
+  isSelected Boolean @default(true) // Чекбокс «выбран»
+
+  cart    Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+
+  @@unique([cartId, productId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ОТЗЫВЫ — строго по макету «Отзыв о товаре»
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model Review {
+  id        Int      @id @default(autoincrement())
+  userId    Int // Только авторизованный пользователь
+  productId Int
+  rating    Int // 1–5 звёзд
+  pros      String?  @db.VarChar(1500) // Достоинства
+  cons      String?  @db.VarChar(1500) // Недостатки
+  comment   String?  @db.VarChar(1500) // Общее впечатление
+  usageTime String // «меньше месяца», «от 1 до 6 месяцев» и т.д.
+  media     String[] // До 5 ссылок на фото/видео
+  likes     Int      @default(0) // Голоса «полезно»
+  dislikes  Int      @default(0) // Голоса «бесполезно»
+
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ЗАКАЗЫ
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model Order {
+  id           Int         @id @default(autoincrement())
+  userId       Int
+  status       OrderStatus @default(NEW)
+  totalAmount  Decimal     @db.Decimal(10, 2) // Итоговая сумма к оплате деньгами
+  usedPoints   Int         @default(0) // Списано баллов (1 балл = 1 руб.)
+  earnedPoints Int         @default(0) // Начислено баллов (7% от totalAmount)
+
+  // ─── Плательщик ─────────────────────────────────────────────────────────────
+  payerType PayerType
+  inn       String? // ИНН — только для юрлица (LEGAL_ENTITY)
+
+  // ─── Доставка ───────────────────────────────────────────────────────────────
+  address     String
+  floor       Int?
+  hasElevator Boolean @default(false)
+  comment     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user  User        @relation(fields: [userId], references: [id])
+  items OrderItem[]
+}
+
+model OrderItem {
+  id              Int     @id @default(autoincrement())
+  orderId         Int
+  productId       Int
+  quantity        Int
+  priceAtPurchase Decimal @db.Decimal(10, 2) // Цена зафиксирована на момент заказа
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// СМЕТЫ
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model Estimate {
+  id        Int      @id @default(autoincrement())
+  name      String
+  userId    Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user  User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items EstimateItem[]
+}
+
+model EstimateItem {
+  id         Int @id @default(autoincrement())
+  estimateId Int
+  productId  Int
+  quantity   Int @default(1)
+
+  estimate Estimate @relation(fields: [estimateId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id])
+
+  @@unique([estimateId, productId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ИЗБРАННОЕ
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model Favorite {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  productId Int
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// СРАВНЕНИЕ
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model ComparisonItem {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  productId Int
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+}
