@@ -2,7 +2,11 @@
   "type": "module",
   "scripts": {
     "start": "node --env-file=.env src/index.js",
-    "dev": "node --env-file=.env --watch src/index.js"
+    "dev":   "node --env-file=.env --watch src/index.js",
+    "seed":  "node --env-file=.env prisma/seed.js"
+  },
+  "prisma": {
+    "seed": "node --env-file=.env prisma/seed.js"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.8.0",
